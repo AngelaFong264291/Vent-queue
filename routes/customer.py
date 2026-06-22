@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models import QueueEntry
 from pydantic import BaseModel
+from websocket_manager import manager
+import asyncio
 
 router = APIRouter()
 
@@ -13,11 +15,15 @@ class JoinQueueRequest(BaseModel):
 
 # Customer joins the queue
 @router.post("/queue/{shop_id}/join")
-def join_queue(
+async def join_queue(
     shop_id: str,
     request: JoinQueueRequest,
     db: Session = Depends(get_db)
 ):
+    # Validate HK phone number
+    if len(request.phone) != 8:
+        return {"error": "Please enter a valid 8-digit HK phone number"}
+
     # Check duplicate phone
     existing = db.query(QueueEntry).filter(
         QueueEntry.phone == request.phone,
@@ -47,6 +53,9 @@ def join_queue(
     db.commit()
     db.refresh(entry)
 
+    # Broadcast to owner dashboard
+    asyncio.create_task(manager.broadcast(shop_id, {"event": "queue_updated"}))
+
     return {
         "message": "Joined queue successfully",
         "entry_id": entry.id,
@@ -61,7 +70,6 @@ def check_status(
     entry_id: int,
     db: Session = Depends(get_db)
 ):
-    # Find this customer's entry
     entry = db.query(QueueEntry).filter(
         QueueEntry.id == entry_id,
         QueueEntry.shop_id == shop_id
@@ -70,7 +78,6 @@ def check_status(
     if not entry:
         return {"error": "Queue entry not found"}
 
-    # Count how many people are ahead
     waiting_ahead = db.query(QueueEntry).filter(
         QueueEntry.shop_id == shop_id,
         QueueEntry.status == "waiting",
@@ -83,4 +90,3 @@ def check_status(
         "position": waiting_ahead + 1,
         "estimated_wait": (waiting_ahead + 1) * 10
     }
-

@@ -7,6 +7,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import os
+from websocket_manager import manager
+import asyncio
 
 load_dotenv()
 
@@ -51,7 +53,7 @@ def get_queue(shop_id: str, db: Session = Depends(get_db)):
 
 # ── 2. Notify customer ────────────────────────────────────────
 @router.post("/owner/{shop_id}/notify/{entry_id}")
-def notify_customer(
+async def notify_customer(
     shop_id: str,
     entry_id: int,
     db: Session = Depends(get_db)
@@ -64,7 +66,6 @@ def notify_customer(
     if not entry:
         return {"error": "Customer no longer exists"}
 
-    # Send SMS
     send_sms(
         entry.phone,
         f"您好 {entry.name}！您係 {shop_id} 嘅枱準備好喇，請喺2分鐘內返嚟 🍽️"
@@ -73,12 +74,13 @@ def notify_customer(
     entry.status = "notified"
     entry.notified_at = datetime.now(timezone.utc)
     db.commit()
+    asyncio.create_task(manager.broadcast(shop_id, {"event": "queue_updated"}))
 
     return {"message": f"SMS sent to {entry.name}"}
 
 # ── 3. Seat customer ──────────────────────────────────────────
 @router.post("/owner/{shop_id}/seat/{entry_id}")
-def seat_customer(
+async def seat_customer(
     shop_id: str,
     entry_id: int,
     db: Session = Depends(get_db)
@@ -94,7 +96,6 @@ def seat_customer(
     entry.status = "seated"
     db.commit()
 
-    # Move everyone behind up one position
     db.query(QueueEntry).filter(
         QueueEntry.shop_id == shop_id,
         QueueEntry.status == "waiting",
@@ -102,11 +103,13 @@ def seat_customer(
     ).update({"position": QueueEntry.position - 1})
     db.commit()
 
+    asyncio.create_task(manager.broadcast(shop_id, {"event": "queue_updated"}))
+
     return {"message": f"{entry.name} has been seated"}
 
 # ── 4. Remove customer ────────────────────────────────────────
 @router.post("/owner/{shop_id}/remove/{entry_id}")
-def remove_customer(
+async def remove_customer(
     shop_id: str,
     entry_id: int,
     db: Session = Depends(get_db)
@@ -117,12 +120,11 @@ def remove_customer(
     ).first()
 
     if not entry:
-        return {"error": "Customer no longer exists."}
+        return {"error": "Customer no longer exists"}
 
     entry.status = "removed"
     db.commit()
 
-    # Move everyone behind up one position
     db.query(QueueEntry).filter(
         QueueEntry.shop_id == shop_id,
         QueueEntry.status == "waiting",
@@ -130,8 +132,9 @@ def remove_customer(
     ).update({"position": QueueEntry.position - 1})
     db.commit()
 
-    return {"message": f"{entry.name} has been removed"}
+    asyncio.create_task(manager.broadcast(shop_id, {"event": "queue_updated"}))
 
+    return {"message": f"{entry.name} has been removed"}
 
 # ── Background task ───────────────────────────────────────────
 def check_queue_timers():
@@ -147,12 +150,10 @@ def check_queue_timers():
         if entry.notified_at:
             mins_since = (now - entry.notified_at).total_seconds() / 60
 
-            # 20 mins passed — auto remove
             if mins_since >= 20:
                 entry.status = "removed"
                 db.commit()
 
-                # Send SMS to notify customer they've been removed
                 send_sms(
                     entry.phone,
                     f"您好 {entry.name}！非常抱歉，您已經超過20分鐘未有返嚟，您的位置已經取消。如需再次排隊請重新掃描QR碼 🙏"

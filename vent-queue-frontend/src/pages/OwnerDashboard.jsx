@@ -18,11 +18,33 @@ export default function OwnerDashboard() {
     setLoading(false);
   };
 
-  // Auto refresh every 10 seconds
+  // WebSocket + initial fetch
   useEffect(() => {
+    // Initial fetch
     fetchQueue();
-    const interval = setInterval(fetchQueue, 10000);
-    return () => clearInterval(interval);
+
+    // WebSocket connection
+    const ws = new WebSocket(`ws://localhost:8000/ws/${shopId}`);
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.event === "queue_updated") {
+        fetchQueue();
+      }
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket disconnected");
+    };
+
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+
+    // Cleanup on unmount
+    return () => {
+      ws.close();
+    };
   }, [shopId]);
 
   const handleNotify = async (entryId) => {
@@ -167,10 +189,12 @@ export default function OwnerDashboard() {
           ))}
         </div>
 
-        {/* Auto refresh note */}
-        <p className="text-gray-600 text-xs text-center mt-6">
-          Auto refreshes every 10 seconds
-        </p>
+        {/* Live indicator */}
+        <div className="flex items-center justify-center gap-2 mt-6">
+          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+          <p className="text-gray-600 text-xs">Live updates</p>
+        </div>
+
       </div>
     </div>
   );
